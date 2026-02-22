@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Танковый бой для Папы</title>
+    <style>
+        body { margin: 0; background-color: #1a1a1a; display: flex; justify-content: center; align-items: center; height: 100vh; color: white; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; }
+        #game-container { position: relative; }
+        canvas { background-color: #4d703b; border: 5px solid #222; box-shadow: 0 0 40px rgba(0,0,0,0.8); }
+        #ui { position: absolute; top: 15px; left: 20px; font-size: 24px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 10; display: flex; gap: 40px; background: rgba(0,0,0,0.5); padding: 10px 20px; border-radius: 8px; }
+        #hp-ui { color: #ff4d4d; }
+        #win-screen { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.9); flex-direction: column; justify-content: center; align-items: center; z-index: 20; text-align: center; padding: 20px; }
+        h1 { font-size: 50px; margin-bottom: 10px; }
+        #win-text { font-size: 28px; line-height: 1.6; max-width: 700px; }
+        button { padding: 15px 40px; font-size: 20px; cursor: pointer; background: #388e3c; color: white; border: none; border-radius: 5px; margin-top: 30px; transition: 0.3s; }
+        button:hover { background: #4caf50; transform: scale(1.05); }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui">
+        <div>Монеты: <span id="score">0</span> / 20</div>
+        <div id="hp-ui">Броня: <span id="hp-val">3</span></div>
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="win-screen">
+        <h1 id="win-title"></h1>
+        <p id="win-text"></p>
+        <button onclick="location.reload()">ИГРАТЬ СНОВА</button>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreElement = document.getElementById('score');
+    const hpElement = document.getElementById('hp-val');
+    const winScreen = document.getElementById('win-screen');
+    const winTitle = document.getElementById('win-title');
+    const winText = document.getElementById('win-text');
+
+    // Аудио движок
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(freq, type, duration, vol = 0.1) {
+        try {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        } catch(e) {}
+    }
+
+    const soundShot = () => playSound(150, 'sawtooth', 0.2);
+    const soundExplode = () => playSound(60, 'square', 0.5, 0.2);
+    const soundCoin = () => playSound(800, 'sine', 0.1);
+    const soundHit = () => playSound(200, 'triangle', 0.3);
+
+    let tank = { x: 100, y: 100, angle: 0, speed: 0, maxSpeed: 3, turnSpeed: 0.07, radius: 18, hp: 3, invul: 0, lastShot: 0 };
+    let enemy = { x: 700, y: 500, angle: Math.PI, speed: 1.2, radius: 18, hp: 2, alive: true, lastShot: 0 };
+    
+    let bullets = [], enemyBullets = [], coins = [], mines = [], tracks = [];
+    let keys = { w: false, a: false, s: false, d: false };
+    let score = 0, gameOver = false, lastMineSpawn = 0;
+
+    let walls = [
+        { x: 150, y: 100, w: 40, h: 200, color: '#8d4a2d', type: 'brick' },
+        { x: 610, y: 100, w: 40, h: 400, color: '#8d4a2d', type: 'brick' },
+        { x: 300, y: 280, w: 200, h: 40, color: '#555', type: 'concrete' },
+        { x: 200, y: 480, w: 250, h: 40, color: '#8d4a2d', type: 'brick' }
+    ];
+
+    window.addEventListener('keydown', e => {if(audioCtx.state === 'suspended') audioCtx.resume();
+        let k = e.code.toLowerCase().replace('key',''); 
+        if(keys.hasOwnProperty(k)) keys[k]=true; 
+    });
+    window.addEventListener('keyup', e => { let k = e.code.toLowerCase().replace('key',''); if(keys.hasOwnProperty(k)) keys[k]=false; });
+    
+    window.addEventListener('mousedown', () => {
+        if(!gameOver && Date.now() - tank.lastShot > 600) {
+            bullets.push({ x: tank.x + Math.cos(tank.angle)*25, y: tank.y + Math.sin(tank.angle)*25, angle: tank.angle });
+            tank.lastShot = Date.now();
+            soundShot();
+        }
+    });
+
+    function isInsideWall(x, y, padding = 25) {
+        return walls.some(w => x > w.x - padding && x < w.x + w.w + padding && y > w.y - padding && y < w.y + w.h + padding);
+    }
+
+    function spawnCoin() {
+        let rx, ry;
+        do { rx = 60 + Math.random()*680; ry = 60 + Math.random()*480; } while (isInsideWall(rx, ry));
+        coins.push({ x: rx, y: ry });
+    }
+
+    function spawnMine() {
+        let mx, my;
+        do { mx = 60 + Math.random()*680; my = 60 + Math.random()*480; } while (isInsideWall(mx, my) || Math.hypot(tank.x-mx, tank.y-my) < 120);
+        mines.push({ x: mx, y: my, active: false, spawnTime: Date.now() });
+    }
+
+    function addTrack(x, y, angle) {
+        if (tracks.length > 80) tracks.shift();
+        tracks.push({ x, y, angle, life: 120 });
+    }
+
+    function showEndScreen(isWin) {
+        gameOver = true;
+        winScreen.style.display = 'flex';
+        if (isWin) {
+            winTitle.innerText = "ПОБЕДА!";
+            winTitle.style.color = "#FFD700";
+            winText.innerText = "Молодец! С 23 февраля!";
+            for(let i=0; i<3; i++) setTimeout(soundCoin, i*200);
+        } else {
+            winTitle.innerText = "ПОРАЖЕНИЕ";
+            winTitle.style.color = "#ff4d4d";
+            winText.innerText = "Враг оказался точнее... Попробуй еще раз!";
+            soundExplode();
+        }
+    }
+
+    function update() {
+        if (gameOver) return;
+
+        if (Date.now() - lastMineSpawn > 5000) { spawnMine(); lastMineSpawn = Date.now(); }
+
+        if (tank.invul > 0) tank.invul--;
+        if (keys.a) tank.angle -= tank.turnSpeed;
+        if (keys.d) tank.angle += tank.turnSpeed;
+        tank.speed = keys.w ? tank.maxSpeed : (keys.s ? -tank.maxSpeed/1.5 : 0);
+        
+        let nx = tank.x + Math.cos(tank.angle)*tank.speed;
+        let ny = tank.y + Math.sin(tank.angle)*tank.speed;
+        const checkWall = (px, py, r) => walls.some(w => px > w.x-r && px < w.x+w.w+r && py > w.y-r && py < w.y+w.h+r);
+
+        if (nx > 20 && nx < 780 && !checkWall(nx, tank.y, tank.radius)) tank.x = nx;
+        if (ny > 20 && ny < 580 && !checkWall(tank.x, ny, tank.radius)) tank.y = ny;
+        if (Math.abs(tank.speed) > 0.1) addTrack(tank.x, tank.y, tank.angle);
+
+        if (enemy.alive) {
+            let dx = tank.x - enemy.x, dy = tank.y - enemy.y;
+            enemy.angle = Math.atan2(dy, dx);
+            let enx = enemy.x + Math.cos(enemy.angle) * enemy.speed;
+            let eny = enemy.y + Math.sin(enemy.angle) * enemy.speed;
+            if (!checkWall(enx, eny, enemy.radius)) { enemy.x = enx; enemy.y = eny; addTrack(enemy.x, enemy.y, enemy.angle); }
+            if (Date.now() - enemy.lastShot > 2500) {
+                enemyBullets.push({ x: enemy.x, y: enemy.y, angle: enemy.angle });
+                enemy.lastShot = Date.now();
+                soundShot();
+            }
+        }
+
+        tracks.forEach((t, i) => { t.life--; if(t.life <= 0) tracks.splice(i, 1); });
+
+        bullets.forEach((b, i) => {
+            b.x += Math.cos(b.angle)*7; b.y += Math.sin(b.angle)*7;
+            walls.forEach((w, wi) => {
+                if (b.x > w.x && b.x < w.x + w.w && b.y > w.y && b.y < w.y + w.h) {
+                    if (w.type === 'brick') { walls.splice(wi, 1); soundHit(); }
+                    bullets.splice(i, 1);
+                }
+            });if (enemy.alive && Math.hypot(b.x-enemy.x, b.y-enemy.y) < 20) {
+                enemy.hp--; bullets.splice(i, 1);
+                soundHit();
+                if (enemy.hp <= 0) { enemy.alive = false; soundExplode(); setTimeout(() => { enemy.alive=true; enemy.hp=2; }, 4000); }
+            }
+        });
+
+        enemyBullets.forEach((b, i) => {
+            b.x += Math.cos(b.angle)*5; b.y += Math.sin(b.angle)*5;
+            walls.forEach((w, wi) => {
+                if (b.x > w.x && b.x < w.x + w.w && b.y > w.y && b.y < w.y + w.h) {
+                    if (w.type === 'brick') { walls.splice(wi, 1); soundHit(); }
+                    enemyBullets.splice(i, 1);
+                }
+            });
+            if (tank.invul <= 0 && Math.hypot(b.x-tank.x, b.y-tank.y) < 20) {
+                tank.hp--; tank.invul = 60; hpElement.innerText = tank.hp; enemyBullets.splice(i, 1);
+                soundHit();
+                if (tank.hp <= 0) showEndScreen(false);
+            }
+        });
+
+        mines.forEach((m, i) => {
+            if (!m.active && Date.now() - m.spawnTime > 2000) m.active = true;
+            if (m.active) {
+                // Игрок подрывается
+                if (Math.hypot(tank.x - m.x, tank.y - m.y) < 25 && tank.invul <= 0) {
+                    tank.hp--; tank.invul = 60; hpElement.innerText = tank.hp;
+                    mines.splice(i, 1);
+                    soundExplode();
+                    if (tank.hp <= 0) showEndScreen(false);
+                }
+                // Враг подрывается (Исправлено)
+                else if (enemy.alive && Math.hypot(enemy.x - m.x, enemy.y - m.y) < 25) {
+                    enemy.hp--;
+                    mines.splice(i, 1);
+                    soundExplode();
+                    if (enemy.hp <= 0) { 
+                        enemy.alive = false; 
+                        setTimeout(() => { enemy.alive=true; enemy.hp=2; }, 4000); 
+                    }
+                }
+            }
+        });
+
+        coins.forEach((c, i) => {
+            if (Math.hypot(tank.x - c.x, tank.y - c.y) < 25) {
+                coins.splice(i, 1); score++; scoreElement.innerText = score; spawnCoin();
+                soundCoin();
+                if (score >= 20) showEndScreen(true);
+            }
+        });
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, 800, 600);
+        ctx.fillStyle = 'rgba(0,0,0,0.1)';
+        tracks.forEach(t => {
+            ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.angle);
+            ctx.fillRect(-15, -12, 5, 3); ctx.fillRect(-15, 9, 5, 3);
+            ctx.restore();
+        });
+        walls.forEach(w => { ctx.fillStyle = w.color; ctx.fillRect(w.x, w.y, w.w, w.h); });
+        mines.forEach(m => {
+            ctx.fillStyle = m.active ? (Math.floor(Date.now()/250)%2 ? '#f00' : '#400') : '#555';
+            ctx.beginPath(); ctx.arc(m.x, m.y, 10, 0, Math.PI*2); ctx.fill();
+        });
+        coins.forEach(c => { ctx.fillStyle = '#FFD700'; ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, Math.PI*2); ctx.fill(); });
+
+        const drawT = (t, col) => {
+            if (!t.alive && t !== tank) return;
+            ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.angle);
+            if (t.invul > 0 && Math.floor(Date.now() / 100) % 2) ctx.globalAlpha = 0.3;
+            ctx.fillStyle = col; ctx.fillRect(-18, -12, 36, 24);
+            ctx.fillStyle = '#111'; ctx.fillRect(10, -3, 16, 6);
+            ctx.restore(); ctx.globalAlpha = 1;
+        };
+        drawT(tank, '#3a5c2a'); if (enemy.alive) drawT(enemy, '#8b2222');
+        ctx.fillStyle = 'yellow'; bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI*2); ctx.fill(); });
+        ctx.fillStyle = 'white'; enemyBullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, Math.PI*2); ctx.fill(); });
+    }
+
+    function loop() { update(); draw(); requestAnimationFrame(loop); }
+    for(let i=0; i<3; i++) spawnCoin();
+    loop();
+</script>
+</body>
+</html>
